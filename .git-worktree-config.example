@@ -12,15 +12,13 @@
 # ============================================================================
 # Determines which editor is used when opening worktrees with cwt and swt.
 #
-# Supported editors:
-#   - cursor   (Cursor editor)
-#   - code     (Visual Studio Code)
-#   - vim      (Vim)
-#   - nvim     (Neovim)
-#   - emacs    (Emacs)
-#   - nano     (Nano)
-#   - subl     (Sublime Text)
-#   - atom     (Atom)
+# Any command on your PATH that accepts a path argument works. Common picks:
+#   GUI:  cursor, code, subl, atom, idea, webstorm, zed
+#   TUI:  nvim, vim, vi, nano, emacs (in -nw mode), helix/hx, micro, kak
+#
+# TUI editors are auto-detected and launched in the foreground (so they
+# don't get suspended in the background). See EDITOR_BACKGROUND below if
+# you want to override that.
 #
 # Default: cursor
 #
@@ -81,6 +79,33 @@ COPY_DIRS=.instrumental,.claude,.cursor
 #   AUTO_OPEN=no     # Same as false
 #
 AUTO_OPEN=true
+
+# ============================================================================
+# EDITOR_BACKGROUND - Whether to launch the editor in the background
+# ============================================================================
+# Controls how cwt/swt run your editor:
+#
+#   auto   - (default) background GUI editors (cursor, code, subl, ...) and
+#            foreground known TUI editors (nvim, vim, emacs, nano, helix,
+#            micro, kak, joe). TUI editors must run in the foreground or
+#            they'll get suspended (SIGTTIN/SIGTTOU) when they touch the
+#            terminal.
+#   true   - always background (`cmd path &`). Good for GUI editors.
+#   false  - always foreground. cwt/swt will block until you exit the
+#            editor. Good if you live in the terminal.
+#
+# Valid values: auto, true, false (also: yes/no, 1/0)
+# Default: auto
+#
+# Examples:
+#   # Neovim user, default auto-detection is enough:
+#   EDITOR=nvim
+#
+#   # Force a GUI editor to block the shell until you close it:
+#   EDITOR=code
+#   EDITOR_BACKGROUND=false
+#
+# EDITOR_BACKGROUND=auto
 
 # ============================================================================
 # WORKTREE_PATH - Custom path pattern for worktree location (ADVANCED)

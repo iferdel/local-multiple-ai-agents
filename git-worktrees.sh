@@ -79,7 +79,68 @@ _gwt_array_append() {
   fi
 }
 
+# Returns 0 if `$1` (an editor command) is a known TUI / terminal editor
+# that would deadlock if backgrounded with `&`. The list is checked by the
+# *basename* of the command so paths like /usr/local/bin/nvim still match.
+_gwt_is_tui_editor() {
+  case "$(basename -- "$1")" in
+    nvim|vim|vi|nano|emacs|micro|helix|hx|kak|joe|ne) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Launches `$1` on `$2` (path), honoring GWT_EDITOR_BACKGROUND:
+#   auto  -> background for GUI, foreground for known TUI editors
+#   true  -> always background (`cmd path &`)
+#   false -> always foreground (blocks until editor exits)
+_gwt_launch_editor() {
+  local editor="$1"
+  local target="$2"
+  local mode="${GWT_EDITOR_BACKGROUND:-auto}"
+
+  case "$mode" in
+    true)  "$editor" "$target" & ;;
+    false) "$editor" "$target" ;;
+    auto|*)
+      if _gwt_is_tui_editor "$editor"; then
+        "$editor" "$target"
+      else
+        "$editor" "$target" &
+      fi
+      ;;
+  esac
+}
+
+# Cross-shell CSV split into a named array.
+# `read -ra` (bash) and `read -A` (zsh) have incompatible flags, and under
+# `emulate -L zsh` the bash form errors out. This split avoids both.
+# Usage: _gwt_split_csv arr_name "a,b,c"
+_gwt_split_csv() {
+  local _arr_name="$1"
+  local _input="$2"
+  local _item
+
+  eval "${_arr_name}=()"
+  while [[ "$_input" == *,* ]]; do
+    _item="${_input%%,*}"
+    eval "${_arr_name}+=(\"\$_item\")"
+    _input="${_input#*,}"
+  done
+  if [[ -n "$_input" ]]; then
+    eval "${_arr_name}+=(\"\$_input\")"
+  fi
+}
+
 # Cross-shell function setup (replaces emulate -L zsh + setopt)
+#
+# Sets GWT_ARR_OFF: the array index offset for the current shell.
+#   zsh arrays are 1-indexed; bash arrays are 0-indexed. Code that needs
+#   to iterate parallel arrays uses `${arr[$((i + GWT_ARR_OFF))]}`.
+#
+# Note: We deliberately do NOT enable `set -e` / `set -o pipefail` in bash
+# here. Bash has no function-local `set` — those options would leak into
+# the caller's interactive shell and break it. zsh's `emulate -L zsh` and
+# `setopt local_options` ARE function-scoped, so they're safe.
 _gwt_function_setup() {
   # Lazy initialization - detect shell on first use
   if [ -z "${GWT_SHELL:-}" ]; then
@@ -87,12 +148,16 @@ _gwt_function_setup() {
   fi
 
   if [ "$GWT_SHELL" = "zsh" ]; then
+    # `emulate -L zsh` is function-scoped (`-L` = local). We deliberately
+    # do NOT enable err_return / pipe_fail / no_unset: every git call in
+    # this script already has explicit error handling, and strict mode
+    # bails on unset locals (e.g. `upstream` after a failing `@{u}` lookup)
+    # producing confusing failures asymmetric to bash.
     emulate -L zsh
     setopt local_options local_traps 2>/dev/null || true
-    setopt err_return pipe_fail no_unset 2>/dev/null || true
-  elif [ "$GWT_SHELL" = "bash" ]; then
-    # Use -eo pipefail without -u to avoid nested function scoping issues
-    set -eo pipefail 2>/dev/null || true
+    GWT_ARR_OFF=1
+  else
+    GWT_ARR_OFF=0
   fi
 }
 
@@ -130,12 +195,19 @@ _load_gwt_config() {
   export GWT_COPY_DIRS="${GWT_COPY_DIRS:-.instrumental,.claude,.cursor}"
   export GWT_AUTO_OPEN="${GWT_AUTO_OPEN:-true}"
   export GWT_WORKTREE_PATH="${GWT_WORKTREE_PATH:-}"
+  # auto | true | false. `auto` (default) backgrounds GUI editors and
+  # foregrounds TUI editors (nvim, vim, emacs -nw, ...).
+  export GWT_EDITOR_BACKGROUND="${GWT_EDITOR_BACKGROUND:-auto}"
 
   # Load config file if it exists
   if [[ -f "$config_file" ]]; then
     while IFS='=' read -r key value; do
       # Skip empty lines and comments
       [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+
+      # Strip trailing CR (handles CRLF line endings)
+      key="${key%$'\r'}"
+      value="${value%$'\r'}"
 
       # Trim whitespace
       key="${key##[[:space:]]}"
@@ -183,6 +255,7 @@ _load_gwt_config() {
           ;;
         AUTO_OPEN) GWT_AUTO_OPEN="$value" ;;
         WORKTREE_PATH) GWT_WORKTREE_PATH="$value" ;;
+        EDITOR_BACKGROUND) GWT_EDITOR_BACKGROUND="$value" ;;
         *) _gwt_print "Warning: Unknown config key '$key' in $config_file" >&2 ;;
       esac
     done < "$config_file"
@@ -198,6 +271,17 @@ _load_gwt_config() {
   case "$GWT_AUTO_OPEN" in
     yes|1) GWT_AUTO_OPEN="true" ;;
     no|0) GWT_AUTO_OPEN="false" ;;
+  esac
+
+  # Validate / normalize EDITOR_BACKGROUND
+  case "$GWT_EDITOR_BACKGROUND" in
+    auto|true|false) ;;
+    yes|1) GWT_EDITOR_BACKGROUND="true" ;;
+    no|0)  GWT_EDITOR_BACKGROUND="false" ;;
+    *)
+      _gwt_print "Warning: Invalid EDITOR_BACKGROUND value '$GWT_EDITOR_BACKGROUND'. Using 'auto'." >&2
+      GWT_EDITOR_BACKGROUND="auto"
+      ;;
   esac
 
   # Validate WORKTREE_PATH pattern (basic check for unsafe characters)
@@ -314,33 +398,33 @@ EOF
     return 0
   }
 
-  # Cleanup function for partial failures
+  # Cleanup helper for partial failures.
+  # Called explicitly on error paths after the worktree has been created.
+  # We deliberately do NOT install a shell trap here: traps in bash are
+  # shell-scoped, not function-scoped, so `trap _cleanup INT TERM EXIT`
+  # would leak into the caller's interactive shell.
   local cleanup_worktree_path=""
   local cleanup_branch_name=""
-  local cleanup_needed=0
 
   _cleanup() {
-    if [[ $cleanup_needed -eq 1 ]] && [[ -n "$cleanup_worktree_path" ]]; then
-      _gwt_print ""
-      _gwt_print "Cleaning up partial worktree creation..."
+    if [[ -z "$cleanup_worktree_path" ]]; then
+      return 0
+    fi
+    _gwt_print ""
+    _gwt_print "Cleaning up partial worktree creation..."
 
-      # Remove worktree if it exists
-      if [[ -d "$cleanup_worktree_path" ]]; then
-        git worktree remove "$cleanup_worktree_path" --force 2>/dev/null || {
-          rm -rf "$cleanup_worktree_path" 2>/dev/null || true
-        }
-        _gwt_print "Removed worktree: $cleanup_worktree_path"
-      fi
+    if [[ -d "$cleanup_worktree_path" ]]; then
+      git -C "$project_dir" worktree remove "$cleanup_worktree_path" --force 2>/dev/null || {
+        rm -rf "$cleanup_worktree_path" 2>/dev/null || true
+      }
+      _gwt_print "Removed worktree: $cleanup_worktree_path"
+    fi
 
-      # Remove branch if it was created
-      if [[ -n "$cleanup_branch_name" ]]; then
-        git branch -D "$cleanup_branch_name" 2>/dev/null && \
-          _gwt_print "Removed branch: $cleanup_branch_name" || true
-      fi
+    if [[ -n "$cleanup_branch_name" ]]; then
+      git -C "$project_dir" branch -D "$cleanup_branch_name" 2>/dev/null && \
+        _gwt_print "Removed branch: $cleanup_branch_name" || true
     fi
   }
-
-  trap _cleanup INT TERM EXIT
 
   # --- Load Configuration ---
 
@@ -412,9 +496,24 @@ EOF
   # Get project name
   local project_name=$(basename "$project_dir")
 
-  # Define paths
-  local worktree_parent="$(dirname "$project_dir")/${project_name}-worktrees"
-  local worktree_path="${worktree_parent}/${feature_name}"
+  # Define paths. If GWT_WORKTREE_PATH is set, use its pattern (with
+  # {PROJECT_NAME} / {FEATURE_NAME} substitution and ~ expansion);
+  # otherwise fall back to the default <parent>/<project>-worktrees layout.
+  local worktree_path worktree_parent
+  if [[ -n "$GWT_WORKTREE_PATH" ]]; then
+    worktree_path="$GWT_WORKTREE_PATH"
+    worktree_path="${worktree_path//\{PROJECT_NAME\}/$project_name}"
+    worktree_path="${worktree_path//\{FEATURE_NAME\}/$feature_name}"
+    # Expand leading ~ and ~/... to $HOME
+    case "$worktree_path" in
+      "~")  worktree_path="$HOME" ;;
+      "~/"*) worktree_path="$HOME/${worktree_path#~/}" ;;
+    esac
+    worktree_parent="$(dirname "$worktree_path")"
+  else
+    worktree_parent="$(dirname "$project_dir")/${project_name}-worktrees"
+    worktree_path="${worktree_parent}/${feature_name}"
+  fi
 
   # Check if worktree already exists
   if [[ -d "$worktree_path" ]]; then
@@ -481,23 +580,24 @@ EOF
     return 1
   fi
 
-  # Enable cleanup in case of failure
+  # Arm cleanup in case a later step fails.
   cleanup_worktree_path="$worktree_path"
   if [[ $create_branch -eq 1 ]]; then
     cleanup_branch_name="$feature_name"
   fi
-  cleanup_needed=1
 
   # Create the worktree
   if [[ $create_branch -eq 1 ]]; then
     if ! git -C "$project_dir" worktree add -b "$feature_name" "$worktree_path"; then
       _gwt_print "Error: Failed to create worktree with new branch."
+      _cleanup
       return 1
     fi
     _gwt_print "Created new branch: $feature_name"
   else
     if ! git -C "$project_dir" worktree add "$worktree_path" "$branch_ref"; then
       _gwt_print "Error: Failed to create worktree for existing branch."
+      _cleanup
       return 1
     fi
     _gwt_print "Checked out existing branch: $branch_name"
@@ -506,7 +606,8 @@ EOF
   # --- Copy Configuration Files ---
 
   # Copy files from config
-  IFS=',' read -ra files_to_copy <<< "$GWT_COPY_FILES"
+  local -a files_to_copy
+  _gwt_split_csv files_to_copy "$GWT_COPY_FILES"
   for file in "${files_to_copy[@]}"; do
     file="${file##[[:space:]]}"
     file="${file%%[[:space:]]}"
@@ -520,7 +621,8 @@ EOF
   done
 
   # Copy directories from config
-  IFS=',' read -ra dirs_to_copy <<< "$GWT_COPY_DIRS"
+  local -a dirs_to_copy
+  _gwt_split_csv dirs_to_copy "$GWT_COPY_DIRS"
   for dir in "${dirs_to_copy[@]}"; do
     dir="${dir##[[:space:]]}"
     dir="${dir%%[[:space:]]}"
@@ -533,6 +635,64 @@ EOF
     fi
   done
 
+  # --- Initialize Submodules ---
+  # Git worktrees share .git/modules/ with the main repo, so submodule
+  # core.worktree can only point to one working tree at a time.
+  # Fix: clone from the local submodule (hardlinked objects, near-zero disk
+  # cost) so each worktree gets its own independent .git directory.
+  if [[ -f "$worktree_path/.gitmodules" ]]; then
+    _gwt_print "Initializing submodules in worktree..."
+    local sub_key sub_name sub_path sub_url sub_commit sub_source
+    # Use process substitution so the loop body runs in the current shell
+    # (not a subshell from a pipeline), letting future state changes
+    # propagate out.
+    while read -r sub_key sub_path; do
+      sub_name="${sub_key#submodule.}"
+      sub_name="${sub_name%.path}"
+      sub_url="$(git -C "$worktree_path" config --file .gitmodules "submodule.${sub_name}.url" 2>/dev/null)"
+      sub_commit="$(git -C "$worktree_path" ls-tree HEAD -- "$sub_path" 2>/dev/null | awk '{print $3}')"
+
+      if [[ -z "$sub_commit" ]]; then
+        _gwt_print "Warning: Could not resolve submodule '$sub_name', skipping."
+        continue
+      fi
+
+      # Submodule must be initialized in the main repo before we can clone
+      # from it. A submodule gitdir lives at either .git/ (legacy) or .git
+      # (a gitfile pointing into .git/modules/...).
+      sub_source="${project_dir}/${sub_path}"
+      if [[ ! -e "${sub_source}/.git" ]]; then
+        _gwt_print "Warning: Submodule '$sub_name' is not initialized in main repo."
+        _gwt_print "         Run in the main repo: git submodule update --init --recursive"
+        continue
+      fi
+
+      # Replace the broken shared-gitdir submodule with a local clone
+      rm -rf "${worktree_path:?}/${sub_path}"
+      if git clone --quiet "$sub_source" "${worktree_path}/${sub_path}" 2>/dev/null && \
+         git -C "${worktree_path}/${sub_path}" checkout --quiet "$sub_commit" 2>/dev/null; then
+        # Point origin to the real remote so push/pull work. Resolve
+        # relative URLs (e.g. ../foo.git) against the main repo's origin
+        # so they remain valid from the worktree location.
+        if [[ -n "$sub_url" ]]; then
+          case "$sub_url" in
+            ./*|../*)
+              local main_origin
+              main_origin="$(git -C "$project_dir" remote get-url origin 2>/dev/null || true)"
+              if [[ -n "$main_origin" ]]; then
+                sub_url="${main_origin%/}/${sub_url}"
+              fi
+              ;;
+          esac
+          git -C "${worktree_path}/${sub_path}" remote set-url origin "$sub_url" 2>/dev/null
+        fi
+        _gwt_print "Submodule '$sub_name' initialized at ${sub_commit:0:7}."
+      else
+        _gwt_print "Warning: Failed to initialize submodule '$sub_name'."
+      fi
+    done < <(git -C "$worktree_path" config --file .gitmodules --get-regexp 'submodule\..*\.path' 2>/dev/null)
+  fi
+
   # --- Open in Editor ---
 
   if [[ $flag_no_open -eq 0 ]] && [[ "$GWT_AUTO_OPEN" == "true" ]]; then
@@ -540,13 +700,14 @@ EOF
     local editor="$GWT_EDITOR"
 
     if _check_editor "$editor"; then
-      "$editor" "$worktree_path" &
       _gwt_print "Opening in $editor..."
+      _gwt_launch_editor "$editor" "$worktree_path"
     fi
   fi
 
-  # Success - disable cleanup
-  cleanup_needed=0
+  # Success - disarm cleanup (no-op now, kept for clarity).
+  cleanup_worktree_path=""
+  cleanup_branch_name=""
 
   _gwt_print "Created worktree at: $worktree_path"
 }
@@ -616,7 +777,13 @@ dwt() {
   local files_count=0
 
   if [[ -d "$worktree_path" ]]; then
-    files_count=$(find "$worktree_path" -type f 2>/dev/null | wc -l | tr -d ' ')
+    # Use git's view of the tree so we don't count .git/ internals or
+    # ignored build artifacts (which made the previous find-based count
+    # wildly inflated on large repos).
+    local _tracked _untracked
+    _tracked=$(git -C "$worktree_path" ls-files 2>/dev/null | wc -l | tr -d ' ')
+    _untracked=$(git -C "$worktree_path" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+    files_count=$((_tracked + _untracked))
   fi
 
   if git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
@@ -660,6 +827,18 @@ dwt() {
     [[ "$confirmation" =~ ^[Yy]$ ]] || { _gwt_print "Cancelled."; return 0; }
   fi
 
+  # Clean up cloned submodules before removing the worktree.
+  # Submodules are standalone clones (not shared-gitdir), so git worktree
+  # remove would fail on directories containing .git subdirectories.
+  if [[ -f "$worktree_path/.gitmodules" ]]; then
+    local _sub_key sub_path
+    while read -r _sub_key sub_path; do
+      if [[ -d "${worktree_path}/${sub_path}/.git" ]]; then
+        rm -rf "${worktree_path:?}/${sub_path}"
+      fi
+    done < <(git -C "$worktree_path" config --file .gitmodules --get-regexp 'submodule\..*\.path' 2>/dev/null)
+  fi
+
   # Do operations without changing the caller's directory
   if ! git -C "$main_repo" worktree remove "$worktree_path" --force; then
     _gwt_print "Failed to remove worktree."
@@ -692,13 +871,6 @@ dwt() {
     fi
   else
     _gwt_print "Detached HEAD - no branch associated with this worktree."
-  fi
-
-  # Post-op: if a lock shows up, surface info without deleting
-  if [[ -e "$lock" ]]; then
-    _gwt_print "index.lock exists after dwt: $lock"
-    command -v lsof >/dev/null 2>&1 && lsof "$lock" || true
-    _gwt_print "   If no holder is listed, it's stale; remove with: rm '$lock'"
   fi
 
   _gwt_print "Done."
@@ -920,11 +1092,31 @@ EOF
     return 1
   fi
 
-  # Parse worktrees into arrays
+  # Parse worktrees into arrays.
+  # Loops below use C-style `for ((i=0; i<n; i++))` plus GWT_ARR_OFF so they
+  # work in both bash (0-indexed arrays) and zsh (1-indexed arrays).
   local -a worktree_paths
   local -a worktree_branches
   local -a worktree_info
-  local current_path current_branch current_info
+  local current_path current_branch
+
+  # Caller's actual current toplevel (handles being inside any worktree,
+  # not just the main repo). Used to mark the right entry as (current).
+  local caller_toplevel
+  caller_toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+  _swt_finalize_entry() {
+    local wt_name status_icon=""
+    wt_name=$(basename "$current_path")
+    if [[ -n "$caller_toplevel" && "$current_path" == "$caller_toplevel" ]]; then
+      status_icon=" (current)"
+    fi
+    worktree_paths+=("$current_path")
+    worktree_branches+=("${current_branch:-main}")
+    worktree_info+=("$wt_name [$current_branch]$status_icon")
+    current_path=""
+    current_branch=""
+  }
 
   while IFS= read -r line; do
     if [[ "$line" == worktree\ * ]]; then
@@ -936,34 +1128,13 @@ EOF
     elif [[ "$line" == detached ]]; then
       current_branch="(detached)"
     elif [[ -z "$line" && -n "$current_path" ]]; then
-      # End of worktree entry
-      local wt_name=$(basename "$current_path")
-      local status_icon=""
-
-      # Check if it's the current worktree
-      if [[ "$current_path" == "$main_repo" || "$current_path" == "$(git rev-parse --show-toplevel 2>/dev/null)" ]]; then
-        status_icon=" (current)"
-      fi
-
-      worktree_paths+=("$current_path")
-      worktree_branches+=("${current_branch:-main}")
-      worktree_info+=("$wt_name [$current_branch]$status_icon")
-
-      current_path=""
-      current_branch=""
+      _swt_finalize_entry
     fi
   done <<<"$worktree_list"
 
   # Handle last entry if file doesn't end with blank line
   if [[ -n "$current_path" ]]; then
-    local wt_name=$(basename "$current_path")
-    local status_icon=""
-    if [[ "$current_path" == "$main_repo" || "$current_path" == "$(git rev-parse --show-toplevel 2>/dev/null)" ]]; then
-      status_icon=" (current)"
-    fi
-    worktree_paths+=("$current_path")
-    worktree_branches+=("${current_branch:-main}")
-    worktree_info+=("$wt_name [$current_branch]$status_icon")
+    _swt_finalize_entry
   fi
 
   if [[ ${#worktree_paths[@]} -eq 0 ]]; then
@@ -972,15 +1143,17 @@ EOF
   fi
 
   local selected_path=""
+  local n=${#worktree_paths[@]}
+  local i idx
 
   # Direct argument provided
   if [[ -n "$direct_arg" ]]; then
     local matched=0
-    local i
-    for i in {1..${#worktree_paths[@]}}; do
-      local wt_name=$(basename "${worktree_paths[$i]}")
-      if [[ "$wt_name" == *"$direct_arg"* || "${worktree_branches[$i]}" == *"$direct_arg"* ]]; then
-        selected_path="${worktree_paths[$i]}"
+    for ((i=0; i<n; i++)); do
+      idx=$((i + GWT_ARR_OFF))
+      local wt_name=$(basename "${worktree_paths[$idx]}")
+      if [[ "$wt_name" == *"$direct_arg"* || "${worktree_branches[$idx]}" == *"$direct_arg"* ]]; then
+        selected_path="${worktree_paths[$idx]}"
         matched=1
         break
       fi
@@ -993,9 +1166,8 @@ EOF
   else
     # Interactive selection
     if command -v fzf >/dev/null 2>&1; then
-      # Use fzf for selection
       local selected_info
-      selected_info=$(printf '%s\n' "${worktree_info[@]}" | fzf --height=40% --border --prompt="Select worktree: " --preview="echo {}" --preview-window=hidden)
+      selected_info=$(printf '%s\n' "${worktree_info[@]}" | fzf --height=40% --border --prompt="Select worktree: ")
 
       if [[ -z "$selected_info" ]]; then
         _gwt_print "No worktree selected."
@@ -1003,10 +1175,10 @@ EOF
       fi
 
       # Find matching path
-      local i
-      for i in {1..${#worktree_info[@]}}; do
-        if [[ "${worktree_info[$i]}" == "$selected_info" ]]; then
-          selected_path="${worktree_paths[$i]}"
+      for ((i=0; i<n; i++)); do
+        idx=$((i + GWT_ARR_OFF))
+        if [[ "${worktree_info[$idx]}" == "$selected_info" ]]; then
+          selected_path="${worktree_paths[$idx]}"
           break
         fi
       done
@@ -1014,21 +1186,22 @@ EOF
       # Fallback to numbered selection
       _gwt_print "Available worktrees:"
       _gwt_print ""
-      local i
-      for i in {1..${#worktree_info[@]}}; do
-        _gwt_print "  $i) ${worktree_info[$i]}"
+      for ((i=0; i<n; i++)); do
+        idx=$((i + GWT_ARR_OFF))
+        _gwt_print "  $((i + 1))) ${worktree_info[$idx]}"
       done
       _gwt_print ""
 
       local selection
-      _gwt_read_prompt "Select worktree (1-${#worktree_info[@]}): " selection
+      _gwt_read_prompt "Select worktree (1-${n}): " selection
 
-      if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt ${#worktree_info[@]} ]]; then
+      if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt $n ]]; then
         _gwt_print "Invalid selection."
         return 1
       fi
 
-      selected_path="${worktree_paths[$selection]}"
+      idx=$((selection - 1 + GWT_ARR_OFF))
+      selected_path="${worktree_paths[$idx]}"
     fi
   fi
 
@@ -1051,8 +1224,8 @@ EOF
     return 1
   fi
 
-  "$editor" "$selected_path" &
   _gwt_print "Opening $(basename "$selected_path") in $editor..."
+  _gwt_launch_editor "$editor" "$selected_path"
 }
 
 # ============================================================================
@@ -1148,8 +1321,9 @@ uwt() {
         fi
         worktree_dirty+=($dirty)
 
-        # Check tracking status
-        local status="no-remote"
+        # Check tracking status. Named `track_status` because zsh treats
+        # `$status` as a read-only special variable (alias for $?).
+        local track_status="no-remote"
         local upstream
         if upstream=$(git -C "$wt_path" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null); then
           local local_commit=$(git -C "$wt_path" rev-parse @ 2>/dev/null)
@@ -1157,16 +1331,16 @@ uwt() {
           local base_commit=$(git -C "$wt_path" merge-base @ @{u} 2>/dev/null)
 
           if [[ "$local_commit" == "$remote_commit" ]]; then
-            status="up-to-date"
+            track_status="up-to-date"
           elif [[ "$local_commit" == "$base_commit" ]]; then
-            status="behind"
+            track_status="behind"
           elif [[ "$remote_commit" == "$base_commit" ]]; then
-            status="ahead"
+            track_status="ahead"
           else
-            status="diverged"
+            track_status="diverged"
           fi
         fi
-        worktree_status+=("$status")
+        worktree_status+=("$track_status")
       fi
 
       # Start new entry
@@ -1196,7 +1370,7 @@ uwt() {
     fi
     worktree_dirty+=($dirty)
 
-    local status="no-remote"
+    local track_status="no-remote"
     local upstream
     if upstream=$(git -C "$wt_path" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null); then
       local local_commit=$(git -C "$wt_path" rev-parse @ 2>/dev/null)
@@ -1204,34 +1378,41 @@ uwt() {
       local base_commit=$(git -C "$wt_path" merge-base @ @{u} 2>/dev/null)
 
       if [[ "$local_commit" == "$remote_commit" ]]; then
-        status="up-to-date"
+        track_status="up-to-date"
       elif [[ "$local_commit" == "$base_commit" ]]; then
-        status="behind"
+        track_status="behind"
       elif [[ "$remote_commit" == "$base_commit" ]]; then
-        status="ahead"
+        track_status="ahead"
       else
-        status="diverged"
+        track_status="diverged"
       fi
     fi
-    worktree_status+=("$status")
+    worktree_status+=("$track_status")
   fi
 
-  # Display worktree status
+  # Display worktree status.
+  # We iterate with a C-style loop and `GWT_ARR_OFF` so this works in both
+  # bash (0-indexed) and zsh (1-indexed). `updateable` stores the 0-based
+  # loop counter so its values stay shell-agnostic.
   _gwt_print "Worktree Status:"
   _gwt_print "================================================================="
 
   local -a updateable
-  local idx=1
-  for i in {1..$#worktree_paths}; do
-    local path="${worktree_paths[$i]}"
-    local branch="${worktree_branches[$i]}"
-    local status="${worktree_status[$i]}"
-    local dirty=${worktree_dirty[$i]}
-    local name=$(basename "$path")
+  local n=${#worktree_paths[@]}
+  local i idx
+  for ((i=0; i<n; i++)); do
+    idx=$((i + GWT_ARR_OFF))
+    # NB: zsh treats `path` as a tied special array (alias for $PATH).
+    # Use `wt_p` instead so `local path=...` doesn't blow up PATH.
+    local wt_p="${worktree_paths[$idx]}"
+    local branch="${worktree_branches[$idx]}"
+    local track_status="${worktree_status[$idx]}"
+    local dirty=${worktree_dirty[$idx]}
+    local name=$(basename "$wt_p")
 
     # Status symbol
     local status_symbol
-    case "$status" in
+    case "$track_status" in
       up-to-date) status_symbol="[OK]" ;;
       behind)     status_symbol="[BEHIND]" ;;
       ahead)      status_symbol="[AHEAD]" ;;
@@ -1245,14 +1426,12 @@ uwt() {
       dirty_indicator=" [DIRTY]"
     fi
 
-    _gwt_print "${idx}. ${status_symbol} ${name} [${branch}] - ${status}${dirty_indicator}"
+    _gwt_print "$((i + 1)). ${status_symbol} ${name} [${branch}] - ${track_status}${dirty_indicator}"
 
     # Add to updateable list if behind and (clean or force)
-    if [[ "$status" == "behind" && ($dirty -eq 0 || $force -eq 1) ]]; then
-      updateable+=($i)
+    if [[ "$track_status" == "behind" && ($dirty -eq 0 || $force -eq 1) ]]; then
+      updateable+=("$i")
     fi
-
-    ((idx++))
   done
   _gwt_print "================================================================="
   _gwt_print ""
@@ -1286,11 +1465,14 @@ uwt() {
   local -a failed
   local -a skipped
 
+  # `to_update` holds 0-based loop counters; convert to a shell-appropriate
+  # array index when accessing the parallel arrays.
   for i in "${to_update[@]}"; do
-    local path="${worktree_paths[$i]}"
-    local branch="${worktree_branches[$i]}"
-    local name=$(basename "$path")
-    local dirty=${worktree_dirty[$i]}
+    idx=$((i + GWT_ARR_OFF))
+    local wt_p="${worktree_paths[$idx]}"
+    local branch="${worktree_branches[$idx]}"
+    local name=$(basename "$wt_p")
+    local dirty=${worktree_dirty[$idx]}
 
     if [[ $dirty -eq 1 && $force -eq 0 ]]; then
       _gwt_print "Skipping $name (uncommitted changes)"
@@ -1299,7 +1481,7 @@ uwt() {
     fi
 
     _gwt_print "Pulling $name..."
-    if git -C "$path" pull --ff-only 2>/dev/null; then
+    if git -C "$wt_p" pull --ff-only 2>/dev/null; then
       updated+=("$name")
       _gwt_print "   Updated $name"
     else
