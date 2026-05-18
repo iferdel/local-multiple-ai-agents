@@ -56,7 +56,7 @@ Git worktrees allow you to have multiple working directories (worktrees) attache
 
 📦 **Automation**
 - Automatic editor opening (configurable)
-- Configuration file copying (`.env`, `.claude`, `.cursor`, etc.)
+- Configuration file copying (`.env`, `.claude`, `.instrumental`, etc.)
 - Remote tracking and sync status checking
 - Uncommitted change detection
 
@@ -163,9 +163,9 @@ your-repo/
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `EDITOR` | string | `cursor` | Editor command to open worktrees |
+| `EDITOR` | string | `nvimf` | Editor command to open worktrees |
 | `COPY_FILES` | comma-separated | `.env` | Files to copy into new worktrees |
-| `COPY_DIRS` | comma-separated | `.instrumental,.claude,.cursor` | Directories to copy into new worktrees |
+| `COPY_DIRS` | comma-separated | `.instrumental,.claude` | Directories to copy into new worktrees |
 | `AUTO_OPEN` | boolean | `true` | Automatically open worktrees in editor |
 | `WORKTREE_PATH` | string | `(empty)` | Custom worktree directory pattern |
 
@@ -176,16 +176,16 @@ Create `.git-worktree-config` in your repository root:
 ```bash
 # Git Worktree Configuration
 
-# Editor to use (e.g., code, cursor, vim, nvim)
-EDITOR=cursor
+# Editor to use (e.g., code, vim, nvim, nvimf)
+EDITOR=nvimf
 
 # Comma-separated list of files to copy into new worktrees
 # Common examples: .env, .env.local, config.json
 COPY_FILES=.env,.env.local,.npmrc
 
 # Comma-separated list of directories to copy into new worktrees
-# Common examples: .claude, .cursor, .vscode, .idea
-COPY_DIRS=.instrumental,.claude,.cursor,.vscode
+# Common examples: .claude, .instrumental, .vscode, .idea
+COPY_DIRS=.instrumental,.claude
 
 # Automatically open worktree in editor after creation (true/false)
 AUTO_OPEN=true
@@ -225,6 +225,7 @@ cwt [OPTIONS] <feature-name>
 |--------|-------------|
 | `-e, --existing` | Checkout an existing branch instead of creating a new one |
 | `-n, --no-open` | Skip opening the worktree in editor |
+| `--embed` | Open editor inline (same terminal) instead of new kitty tab |
 | `-h, --help` | Show help message |
 
 #### Behavior
@@ -234,6 +235,26 @@ cwt [OPTIONS] <feature-name>
 3. **Creates or checks out** the specified branch
 4. **Copies** configured files and directories (`.env`, `.claude`, etc.)
 5. **Opens** the worktree in your configured editor (unless `-n` is used)
+
+##### Editor launch behavior (Neovim + Kitty)
+
+The default editor is `nvimf` (a Neovim wrapper). Because launching a TUI editor
+inside another terminal-embedded editor would nest Neovim-in-Neovim, `cwt` detects
+when it's running inside [Kitty](https://sw.kovidgoyal.net/kitty/) (via
+`$KITTY_WINDOW_ID`) and opens the editor in a **new Kitty tab** by default. This
+keeps your current shell free and gives each worktree its own tab titled after
+the feature name.
+
+- Outside Kitty: editor launches inline in the current terminal (same as upstream).
+- Inside Kitty: a new tab is opened via `kitten @ launch --type=tab --cwd <worktree> <editor> .`.
+- Pass `--embed` to force inline launch regardless of terminal.
+- If the Kitty remote-control call fails, `cwt` falls back to inline launch.
+
+**Requirement:** for Kitty tab spawning, your `kitty.conf` must include:
+```conf
+allow_remote_control yes
+listen_on unix:/tmp/kitty
+```
 
 #### Examples
 
@@ -262,6 +283,12 @@ cwt -e origin/hotfix-456
 cwt -n testing
 # Creates worktree but doesn't launch editor
 # Useful for scripting or batch operations
+```
+
+**Open editor inline instead of new kitty tab:**
+```bash
+cwt --embed feature-123
+# Launches nvimf in the current terminal instead of spawning a new kitty tab
 ```
 
 **Complex feature branch:**
@@ -293,9 +320,9 @@ The script includes robust error handling:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GWT_EDITOR` | `cursor` | Editor to launch |
+| `GWT_EDITOR` | `nvimf` | Editor to launch |
 | `GWT_COPY_FILES` | `.env` | Files to copy |
-| `GWT_COPY_DIRS` | `.instrumental,.claude,.cursor` | Directories to copy |
+| `GWT_COPY_DIRS` | `.instrumental,.claude` | Directories to copy |
 | `GWT_AUTO_OPEN` | `true` | Auto-open in editor |
 
 ---
@@ -514,7 +541,7 @@ swt
 #   3) hotfix-bug [hotfix/bug-fix]
 #
 # Select worktree (1-3): 2
-# Opening feature-login in cursor...
+# Opening feature-login in nvimf...
 ```
 
 **Direct selection:**
@@ -566,7 +593,7 @@ sudo dnf install fzf      # Fedora
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GWT_EDITOR` | `cursor` | Editor to open worktree in |
+| `GWT_EDITOR` | `nvimf` | Editor to open worktree in |
 
 ---
 
@@ -740,7 +767,7 @@ fi
 ### Safe Defaults
 
 When configuration values fail validation:
-- `EDITOR`: Falls back to `cursor`
+- `EDITOR`: Falls back to `nvimf`
 - `COPY_FILES`: Falls back to `.env`
 - `COPY_DIRS`: Falls back to empty (no directories)
 - `AUTO_OPEN`: Falls back to `true`
@@ -1060,7 +1087,7 @@ cwt feature-test
 
 ---
 
-#### 2. "Editor 'cursor' not found in PATH"
+#### 2. "Editor 'nvimf' not found in PATH"
 
 **Problem:** Configured editor is not installed or not in PATH.
 

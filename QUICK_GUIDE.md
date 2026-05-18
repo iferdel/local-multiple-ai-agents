@@ -15,9 +15,9 @@ source ~/.zshrc
 
 # 3. Configure per-project (optional)
 cat > .git-worktree-config <<EOF
-EDITOR=cursor
+EDITOR=nvimf
 COPY_FILES=.env,.env.local
-COPY_DIRS=.claude,.cursor,.vscode
+COPY_DIRS=.claude,.instrumental
 AUTO_OPEN=true
 EOF
 ```
@@ -42,13 +42,20 @@ EOF
 
 ### cwt - Create Worktree
 ```bash
-cwt feature-login              # Create new branch + worktree
+cwt feature-login              # Create new branch + worktree (opens in new kitty tab)
 cwt -e main                    # Checkout existing branch
 cwt -e origin/hotfix-123       # Checkout remote branch
 cwt -n experiment              # Create without opening editor
+cwt --embed feature-login      # Open editor inline in current terminal
 ```
 
-**Auto-copies:** .env, .claude, .cursor directories to new worktree
+**Auto-copies:** .env, .claude, .instrumental directories to new worktree
+
+**Editor launch:** when running inside kitty (detected via `$KITTY_WINDOW_ID`), `cwt`
+opens `nvimf` in a new kitty tab so you don't end up with Neovim-inside-Neovim.
+Use `--embed` to force inline launch in the current terminal. Outside kitty,
+the editor launches inline by default. Requires `allow_remote_control yes` in
+`kitty.conf`.
 
 ### dwt - Delete Worktree
 ```bash
@@ -127,13 +134,13 @@ lwt                            # Check status
 **File:** `.git-worktree-config` (in repo root)
 
 ```bash
-EDITOR=cursor                              # code, vim, nvim
+EDITOR=nvimf                               # code, vim, nvim, nvimf
 COPY_FILES=.env,.env.local                 # Comma-separated
-COPY_DIRS=.claude,.cursor,.vscode          # Comma-separated
+COPY_DIRS=.claude,.instrumental            # Comma-separated
 AUTO_OPEN=true                             # false to disable
 ```
 
-**No config?** Defaults work fine (cursor editor, copies .env)
+**No config?** Defaults work fine (nvimf editor, copies .env)
 
 ---
 
@@ -155,6 +162,7 @@ AUTO_OPEN=true                             # false to disable
 ### cwt
 - `-e, --existing` - Use existing branch
 - `-n, --no-open` - Don't open editor
+- `--embed` - Open editor inline (same terminal) instead of new kitty tab
 - `-h, --help` - Show help
 
 ### dwt

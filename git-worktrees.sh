@@ -84,9 +84,26 @@ _gwt_array_append() {
 # *basename* of the command so paths like /usr/local/bin/nvim still match.
 _gwt_is_tui_editor() {
   case "$(basename -- "$1")" in
-    nvim|vim|vi|nano|emacs|micro|helix|hx|kak|joe|ne) return 0 ;;
+    nvim|nvimf|vim|vi|nano|emacs|micro|helix|hx|kak|joe|ne) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Launches `$1` on `$2` (path) in a new kitty tab via remote control.
+# `$3` is the tab title. Requires `allow_remote_control yes` in kitty.conf.
+# Returns 0 on success, non-zero if kitty isn't available or the call fails.
+_gwt_launch_kitty_tab() {
+  local editor="$1"
+  local target="$2"
+  local title="$3"
+
+  if command -v kitten >/dev/null 2>&1; then
+    kitten @ launch --type=tab --cwd "$target" --tab-title "$title" "$editor" .
+  elif command -v kitty >/dev/null 2>&1; then
+    kitty @ launch --type=tab --cwd "$target" --tab-title "$title" "$editor" .
+  else
+    return 1
+  fi
 }
 
 # Launches `$1` on `$2` (path), honoring GWT_EDITOR_BACKGROUND:
@@ -190,9 +207,9 @@ _load_gwt_config() {
   local config_file="$project_dir/.git-worktree-config"
 
   # Set sensible defaults
-  export GWT_EDITOR="${GWT_EDITOR:-cursor}"
+  export GWT_EDITOR="${GWT_EDITOR:-nvimf}"
   export GWT_COPY_FILES="${GWT_COPY_FILES:-.env}"
-  export GWT_COPY_DIRS="${GWT_COPY_DIRS:-.instrumental,.claude,.cursor}"
+  export GWT_COPY_DIRS="${GWT_COPY_DIRS:-.instrumental,.claude}"
   export GWT_AUTO_OPEN="${GWT_AUTO_OPEN:-true}"
   export GWT_WORKTREE_PATH="${GWT_WORKTREE_PATH:-}"
   # auto | true | false. `auto` (default) backgrounds GUI editors and
@@ -226,7 +243,7 @@ _load_gwt_config() {
              [[ "$value" == *'$('* ]] || \
              [[ "$value" == *'`'* ]]; then
             _gwt_print "Error: EDITOR contains unsafe characters" >&2
-            GWT_EDITOR="cursor"  # Use safe default
+            GWT_EDITOR="nvimf"  # Use safe default
           else
             GWT_EDITOR="$value"
           fi
@@ -320,10 +337,11 @@ Create a new git worktree with a new or existing branch.
 OPTIONS:
     -e, --existing      Checkout existing branch instead of creating new one
     -n, --no-open       Skip opening the worktree in editor
+        --embed         Open editor inline (same terminal) instead of new kitty tab
     -h, --help          Show this help message
 
 ENVIRONMENT VARIABLES:
-    GWT_EDITOR          Editor to open worktree in (default: cursor)
+    GWT_EDITOR          Editor to open worktree in (default: nvimf)
 
 EXAMPLES:
     cwt feature-123                 # Create new branch and worktree
@@ -434,6 +452,7 @@ EOF
 
   local flag_existing=0
   local flag_no_open=0
+  local flag_embed=0
   local feature_name=""
 
   # Parse arguments
@@ -449,6 +468,10 @@ EOF
         ;;
       -n|--no-open)
         flag_no_open=1
+        shift
+        ;;
+      --embed)
+        flag_embed=1
         shift
         ;;
       -*)
@@ -700,8 +723,16 @@ EOF
     local editor="$GWT_EDITOR"
 
     if _check_editor "$editor"; then
-      _gwt_print "Opening in $editor..."
-      _gwt_launch_editor "$editor" "$worktree_path"
+      if [[ $flag_embed -eq 0 ]] && [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
+        _gwt_print "Opening $editor in new kitty tab..."
+        if ! _gwt_launch_kitty_tab "$editor" "$worktree_path" "$feature_name"; then
+          _gwt_print "Kitty tab launch failed; falling back to inline."
+          _gwt_launch_editor "$editor" "$worktree_path"
+        fi
+      else
+        _gwt_print "Opening in $editor..."
+        _gwt_launch_editor "$editor" "$worktree_path"
+      fi
     fi
   fi
 
@@ -1061,7 +1092,7 @@ EXAMPLES:
   swt -p                 # Print path for use with: cd $(swt -p)
 
 ENVIRONMENT:
-  GWT_EDITOR            Editor command (default: cursor)
+  GWT_EDITOR            Editor command (default: nvimf)
 EOF
     return 0
   fi
