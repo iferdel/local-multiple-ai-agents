@@ -338,16 +338,23 @@ OPTIONS:
     -e, --existing      Checkout existing branch instead of creating new one
     -n, --no-open       Skip opening the worktree in editor
         --embed         Open editor inline (same terminal) instead of new kitty tab
+    -jw, --jira-workflow
+                        Open Claude Code with /jira-workflow:orchestrator on
+                        the worktree (treats the worktree name as a Jira key).
+                        Overrides GWT_EDITOR for this invocation only.
     -h, --help          Show this help message
 
 ENVIRONMENT VARIABLES:
     GWT_EDITOR          Editor to open worktree in (default: nvimf)
+    GWT_JIRA_LAUNCHER   Script used by --jira-workflow
+                        (default: claude-worktree.sh next to git-worktrees.sh)
 
 EXAMPLES:
     cwt feature-123                 # Create new branch and worktree
     cwt -e main                     # Checkout existing 'main' branch
     cwt -e origin/feature-456       # Checkout remote branch
     cwt -n hotfix                   # Create worktree without opening editor
+    cwt -jw PROJ-123                # Open in Claude with jira-workflow orchestrator
 EOF
   }
 
@@ -453,6 +460,7 @@ EOF
   local flag_existing=0
   local flag_no_open=0
   local flag_embed=0
+  local flag_jira=0
   local feature_name=""
 
   # Parse arguments
@@ -472,6 +480,10 @@ EOF
         ;;
       --embed)
         flag_embed=1
+        shift
+        ;;
+      -jw|--jira-workflow)
+        flag_jira=1
         shift
         ;;
       -*)
@@ -719,8 +731,20 @@ EOF
   # --- Open in Editor ---
 
   if [[ $flag_no_open -eq 0 ]] && [[ "$GWT_AUTO_OPEN" == "true" ]]; then
-    # Determine editor
+    # Determine editor. --jira-workflow swaps to the Claude+orchestrator
+    # launcher for this invocation only, and forces foreground because the
+    # launcher exec's `claude` (a TUI not in _gwt_is_tui_editor's allowlist).
     local editor="$GWT_EDITOR"
+    if [[ $flag_jira -eq 1 ]]; then
+      local default_launcher
+      if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+        default_launcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-worktree.sh"
+      elif [[ -n "${ZSH_VERSION:-}" ]]; then
+        default_launcher="$(cd "$(dirname "${(%):-%x}")" && pwd)/claude-worktree.sh"
+      fi
+      editor="${GWT_JIRA_LAUNCHER:-$default_launcher}"
+      GWT_EDITOR_BACKGROUND=false
+    fi
 
     if _check_editor "$editor"; then
       if [[ $flag_embed -eq 0 ]] && [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
