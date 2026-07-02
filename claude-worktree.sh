@@ -32,4 +32,4 @@ fi
 ticket="$(basename "$target")"
 
 cd "$target"
-exec claude "/jira-workflow:orchestrator $ticket — drive the full workflow end-to-end until a PR is opened: create-plan, create-implementation-plan, create-testing-plan, then implementation, testing, review, and PR creation. Do not stop after planning."
+exec claude "/jira-workflow:orchestrator $ticket — drive the full workflow end-to-end until a PR is opened. FIRST, before any planning or implementation, run 'git pull origin main' to sync this branch with the latest origin main, and resolve any merge conflicts. THEN proceed: create-plan, create-implementation-plan, create-testing-plan, then implementation, testing, review. FINALLY, before pushing and opening the PR, run 'git pull origin main' again and resolve any merge conflicts that arose while you worked. Do not stop after planning."
