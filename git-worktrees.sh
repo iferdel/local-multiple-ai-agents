@@ -340,14 +340,27 @@ OPTIONS:
         --embed         Open editor inline (same terminal) instead of new kitty tab
     -jw, --jira-workflow
                         Open Claude Code with /jira-workflow:orchestrator on
-                        the worktree (treats the worktree name as a Jira key).
+                        the worktree (treats the worktree name as a ticket key;
+                        the tracker backend — jira/github/local — is resolved
+                        by the repo's .github/workflow.json).
                         Overrides GWT_EDITOR for this invocation only.
+    -ghc, --copilot-workflow
+                        Same as -jw but with GitHub Copilot CLI: runs the
+                        orchestrator from the repo's committed skill files
+                        (.github/skills/orchestrator/SKILL.md). The repo must
+                        expose the workflow skills there. Mutually exclusive
+                        with -jw.
     -h, --help          Show this help message
 
 ENVIRONMENT VARIABLES:
     GWT_EDITOR          Editor to open worktree in (default: nvimf)
     GWT_JIRA_LAUNCHER   Script used by --jira-workflow
                         (default: claude-worktree.sh next to git-worktrees.sh)
+    GWT_COPILOT_LAUNCHER
+                        Script used by --copilot-workflow
+                        (default: copilot-worktree.sh next to git-worktrees.sh)
+    GWT_COPILOT_FLAGS   Extra flags copilot-worktree passes to the copilot CLI
+                        (default: --allow-all-tools)
 
 EXAMPLES:
     cwt feature-123                 # Create new branch and worktree
@@ -355,6 +368,7 @@ EXAMPLES:
     cwt -e origin/feature-456       # Checkout remote branch
     cwt -n hotfix                   # Create worktree without opening editor
     cwt -jw PROJ-123                # Open in Claude with jira-workflow orchestrator
+    cwt -ghc PROJ-123               # Same, but driven by GitHub Copilot CLI
 EOF
   }
 
@@ -461,6 +475,7 @@ EOF
   local flag_no_open=0
   local flag_embed=0
   local flag_jira=0
+  local flag_copilot=0
   local feature_name=""
 
   # Parse arguments
@@ -484,6 +499,10 @@ EOF
         ;;
       -jw|--jira-workflow)
         flag_jira=1
+        shift
+        ;;
+      -ghc|--copilot-workflow)
+        flag_copilot=1
         shift
         ;;
       -*)
@@ -735,14 +754,25 @@ EOF
     # launcher for this invocation only, and forces foreground because the
     # launcher exec's `claude` (a TUI not in _gwt_is_tui_editor's allowlist).
     local editor="$GWT_EDITOR"
-    if [[ $flag_jira -eq 1 ]]; then
+    if [[ $flag_jira -eq 1 && $flag_copilot -eq 1 ]]; then
+      _gwt_print "Error: -jw and -ghc are mutually exclusive."
+      return 1
+    fi
+
+    if [[ $flag_jira -eq 1 || $flag_copilot -eq 1 ]]; then
+      local launcher_script="claude-worktree.sh"
+      [[ $flag_copilot -eq 1 ]] && launcher_script="copilot-worktree.sh"
       local default_launcher
       if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-        default_launcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-worktree.sh"
+        default_launcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$launcher_script"
       elif [[ -n "${ZSH_VERSION:-}" ]]; then
-        default_launcher="$(cd "$(dirname "${(%):-%x}")" && pwd)/claude-worktree.sh"
+        default_launcher="$(cd "$(dirname "${(%):-%x}")" && pwd)/$launcher_script"
       fi
-      editor="${GWT_JIRA_LAUNCHER:-$default_launcher}"
+      if [[ $flag_copilot -eq 1 ]]; then
+        editor="${GWT_COPILOT_LAUNCHER:-$default_launcher}"
+      else
+        editor="${GWT_JIRA_LAUNCHER:-$default_launcher}"
+      fi
       GWT_EDITOR_BACKGROUND=false
     fi
 
