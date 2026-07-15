@@ -339,17 +339,17 @@ OPTIONS:
     -n, --no-open       Skip opening the worktree in editor
         --embed         Open editor inline (same terminal) instead of new kitty tab
     -jw, --jira-workflow
-                        Open Claude Code with /jira-workflow:orchestrator on
+                        Open Claude Code with /spec-workflow:orchestrator on
                         the worktree (treats the worktree name as a ticket key;
-                        the tracker backend — jira/github/local — is resolved
-                        by the repo's .github/workflow.json).
+                        the tracker backend — jira/local — is resolved
+                        by the repo's .spec-workflow/config.json).
                         Overrides GWT_EDITOR for this invocation only.
     -ghc, --copilot-workflow
                         Same as -jw but with GitHub Copilot CLI: runs the
                         orchestrator from the repo's committed skill files
-                        (.github/skills/orchestrator/SKILL.md). The repo must
-                        expose the workflow skills there. Mutually exclusive
-                        with -jw.
+                        (.github/skills/orchestrator/SKILL.md) if present,
+                        else from the globally-installed spec-workflow skills.
+                        Mutually exclusive with -jw.
     -h, --help          Show this help message
 
 ENVIRONMENT VARIABLES:
@@ -367,7 +367,7 @@ EXAMPLES:
     cwt -e main                     # Checkout existing 'main' branch
     cwt -e origin/feature-456       # Checkout remote branch
     cwt -n hotfix                   # Create worktree without opening editor
-    cwt -jw PROJ-123                # Open in Claude with jira-workflow orchestrator
+    cwt -jw PROJ-123                # Open in Claude with spec-workflow orchestrator
     cwt -ghc PROJ-123               # Same, but driven by GitHub Copilot CLI
 EOF
   }
